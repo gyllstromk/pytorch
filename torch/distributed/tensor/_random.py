@@ -203,8 +203,8 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
                 f"CUDA/CUDA-like/XPU device. Got {self._device.type} instead."
             )
 
-        rng_state = self._get_device_state()
         if run_state_sync:
+            rng_state = self._get_device_state()
             # synchronize RNG state using rank 0's current one
             torch.distributed.broadcast(rng_state, 0)
             my_rng_state = self._get_device_state()
@@ -388,6 +388,37 @@ class OffsetBasedRNGTracker(_RNGStateTracker):
         # source: aten/src/ATen/cuda/CUDAGeneratorImpl.cpp
         numel = (numel + 3) // 4 * 4
         state.offset = old_offset + numel
+
+    def _compute_rng_offsets(self, spec: DTensorSpec) -> tuple[int, int]:
+        """Compute the RNG offset increment and DTensor numel for a distributed random op.
+
+        These values are derived from mesh topology, placements, and tensor shape,
+        and are static for a given compiled graph. They can be burned into the graph
+        as integer constants rather than keeping the DTensorSpec around at runtime.
+
+        Returns:
+            (start_offset_incr, end_offset_incr) — both aligned to multiples of 4.
+        """
+        from torch.distributed.tensor._ops.utils import prod
+
+        mesh = spec.mesh
+        mesh_coordinate = mesh.get_coordinate()
+        assert mesh_coordinate is not None
+
+        shard_idx_by_dim, total_num_shards_by_dim = _calc_shard_info(
+            mesh_coordinate, spec
+        )
+        shard_linear_idx = self._calc_shard_linear_idx(
+            shard_idx_by_dim, total_num_shards_by_dim
+        )
+        local_size = prod(_calc_first_shard_size(spec))
+        start_offset_incr = (shard_linear_idx * local_size + 3) // 4 * 4
+
+        # Compute end state with post-op offset
+        end_offset_incr = prod(spec.shape)
+        end_offset_incr = (end_offset_incr + 3) // 4 * 4
+
+        return start_offset_incr, end_offset_incr
 
     def _calc_shard_linear_idx(
         self, shard_coord: list[int], shard_size: list[int]

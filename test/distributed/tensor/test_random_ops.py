@@ -691,6 +691,160 @@ class DistTensorRandomOpTest(DTensorTestBase):
         philox.seed = philox.seed.clone()
 
 
+class DistTensorRandomOpCompileTest(DTensorTestBase):
+    def _test_compile_random_op(self, fn, device_mesh, create_input=None):
+        """Run fn eager and compiled, assert results match and graph contains run_dtensor_rng_op."""
+        from torch._dynamo.testing import AotEagerAndRecordGraphs
+
+        if create_input is None:
+
+            def create_input():
+                return torch.distributed.tensor.ones(
+                    (8, 8), device_mesh=device_mesh, placements=[Shard(0)]
+                )
+
+        def run(compile):
+            torch.manual_seed(0)
+            x = create_input()
+            if compile:
+                backend = AotEagerAndRecordGraphs()
+                compiled_fn = torch.compile(fn, backend=backend, fullgraph=True)
+                result = compiled_fn(x)
+                self.assertIn("run_dtensor_rng_op", backend.fw_graphs[0].code)
+            else:
+                result = fn(x)
+            return result.to_local().clone()
+
+        eager = run(compile=False)
+        compiled = run(compile=True)
+        self.assertEqual(eager, compiled)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_native_dropout(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.nn.functional.dropout(x, p=0.5, training=True)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_normal_(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return x.normal_()
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_rand(self):
+        """aten.rand.default is a factory op (first arg is size, not tensor).
+        It cannot trigger DTensor dispatch directly. Test via rand_like which
+        exercises the same RNG codepath."""
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.rand_like(x)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_rand_like(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.rand_like(x)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_randn(self):
+        """aten.randn.default is a factory op (first arg is size, not tensor).
+        It cannot trigger DTensor dispatch directly. Test via randn_like which
+        exercises the same RNG codepath."""
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.randn_like(x)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_randn_like(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.randn_like(x)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_randint_like(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.randint_like(x, 0, 10)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_uniform_(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return x.uniform_(0.0, 1.0)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_bernoulli(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return torch.bernoulli(x)
+
+        def create_input():
+            return distribute_tensor(
+                torch.full((8, 8), 0.5, device=self.device_type),
+                device_mesh,
+                [Shard(0)],
+            )
+
+        self._test_compile_random_op(fn, device_mesh, create_input=create_input)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_bernoulli_float(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            return x.bernoulli_(0.5)
+
+        self._test_compile_random_op(fn, device_mesh)
+
+    @with_comms
+    @skip_unless_torch_gpu
+    def test_compile_multiple_random_ops(self):
+        device_mesh = self.build_device_mesh()
+
+        def fn(x):
+            x = x.uniform_(0, 1)
+            x = torch.nn.functional.dropout(x, p=0.5)
+            return x
+
+        self._test_compile_random_op(fn, device_mesh)
+
+
 class DistTensorRandomOpsTest3D(DTensorTestBase):
     @property
     def world_size(self):
