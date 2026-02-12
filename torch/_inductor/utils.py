@@ -1314,21 +1314,30 @@ def fresh_cache(
 
     Optionally, pass a dict as 'cache_entries' to get a list of filenames and sizes
     generated with this cache instance.
+
+    Note: we avoid mock.patch.dict(os.environ, ...) here because it internally
+    calls os.environ.copy(), which iterates all env var keys then fetches values
+    in separate steps. This is not atomic and can race with background threads
+    (e.g. Triton async compilation) modifying the environment, causing KeyError.
+    Instead we use os.environ.get() for individual keys, which is an atomic
+    C-level lookup.
     """
     clear_caches()
 
     from torch._inductor.cpp_builder import normalize_path_separator
 
     inductor_cache_dir = normalize_path_separator(tempfile.mkdtemp(dir=dir))
+    old_inductor = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    old_triton = os.environ.get("TRITON_CACHE_DIR")
     try:
-        with mock.patch.dict(
-            os.environ, {"TORCHINDUCTOR_CACHE_DIR": inductor_cache_dir}
-        ):
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache_dir
+        try:
             log.debug("Using inductor cache dir %s", inductor_cache_dir)
             triton_cache_dir = normalize_path_separator(
                 os.path.join(inductor_cache_dir, "triton")
             )
-            with mock.patch.dict(os.environ, {"TRITON_CACHE_DIR": triton_cache_dir}):
+            os.environ["TRITON_CACHE_DIR"] = triton_cache_dir
+            try:
                 yield
                 if isinstance(cache_entries, dict):
                     assert len(cache_entries) == 0, "expected empty cache_entries dict"
@@ -1336,11 +1345,23 @@ def fresh_cache(
                         files = os.listdir(triton_cache_dir)
                         cache_entries.update(
                             {
-                                f: os.path.getsize(os.path.join(triton_cache_dir, f))
+                                f: os.path.getsize(
+                                    os.path.join(triton_cache_dir, f)
+                                )
                                 for f in files
                                 if ".lock" not in f
                             }
                         )
+            finally:
+                if old_triton is None:
+                    os.environ.pop("TRITON_CACHE_DIR", None)
+                else:
+                    os.environ["TRITON_CACHE_DIR"] = old_triton
+        finally:
+            if old_inductor is None:
+                os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
+            else:
+                os.environ["TORCHINDUCTOR_CACHE_DIR"] = old_inductor
         if delete:
             if is_windows() and torch.xpu.is_available():
                 unload_xpu_triton_pyds()
